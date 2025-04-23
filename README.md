@@ -17,6 +17,7 @@
 ---
 
 ## 目錄結構
+<code>
 YouTubeToMp3Converter/
 ├── Controllers/
 │   └── HomeController.cs     # 核心邏輯
@@ -30,7 +31,7 @@ YouTubeToMp3Converter/
 │   ├── ffmpeg.exe
 │   └── ffprobe.exe
 └── README.md
-
+</code>
 
 
 ---
