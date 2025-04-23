@@ -5,14 +5,15 @@
 <h2 class="mb-3">YouTube 轉 MP3</h2>
 <h3 class="mb-3">皮卡綸專用</h3>
 
-<div class="mb-3">
+<div class="input-group mb-3">
     <input id="url" class="form-control" placeholder="https://youtu.be/..." />
+    <!-- ① 按鈕文字改為「轉檔」 -->
+    <button id="btnConvert" class="btn btn-primary">轉檔</button>
+    <button id="btnClear" class="btn btn-outline-secondary">清空</button>
 </div>
 
-<button id="btn" class="btn btn-primary">下載</button>
-
-<!-- 進度條 -->
-<div class="progress mt-4" style="height:25px; display:none;">
+<!-- ② 進度條預設隱藏；按下「轉檔」立即顯示 -->
+<div id="progressWrap" class="progress" style="height:25px; display:none;">
     <div id="bar" class="progress-bar" role="progressbar"
          style="width:0%">
         0%
@@ -21,37 +22,67 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js"></script>
 <script>
-    $('#btn').on('click', async () => {
-        const url = $('#url').val();
+    let es = null;                // EventSource
+    let currentJobId = null;      // 追蹤下載中與否
+
+    function resetUI() {
+        $('#url').val('');
+        $('#progressWrap').hide();
+        $('#bar').css('width','0%').text('0%');
+        if (es) { es.close(); es = null; }
+        currentJobId = null;
+    }
+
+    /* ===== 轉檔按鈕 ===== */
+    $('#btnConvert').on('click', async () => {
+        const url = $('#url').val().trim();
         if (!url) { alert('請輸入網址'); return; }
 
-        // 1️⃣  送 /Start 取得 jobId
-        const fd = new FormData();
+        /* 先顯示進度條 0%，讓使用者感覺立即有反應 */
+        $('#progressWrap').show();
+        $('#bar').css('width','0%').text('0%');
+
+        const fd  = new FormData();
         fd.append('url', url);
-        const res = await fetch('/Home/Start', { method:'POST', body:fd });
-        if (!res.ok) { alert(await res.text()); return; }
-        const { jobId, title } = await res.json();
 
-        $('.progress').show();
-        $('#bar').text('0%').css('width','0%');
+        try {
+            const res = await fetch('/Home/Start', { method:'POST', body:fd });
+            if (!res.ok) {
+                alert(await res.text());
+                resetUI();
+                return;
+            }
+            const { jobId } = await res.json();
+            currentJobId = jobId;
 
-        // 2️⃣  接進度
-        const es = new EventSource(`/Home/Progress?jobId=${jobId}`);
-        es.onmessage = e => {
-            const pct = parseFloat(e.data);
-            $('#bar').css('width', `${pct}%`).text(`${pct.toFixed(0)}%`);
-        };
-        es.addEventListener('complete', e => {
-            es.close();
-            $('#bar').css('width', '100%').text('100%');
-            alert('✔ 下載完成！');
+            /* 建立 SSE 連線 */
+            es = new EventSource(`/Home/Progress?jobId=${jobId}`);
+            es.onmessage = e => {
+                const pct = parseFloat(e.data);
+                $('#bar').css('width', `${pct}%`).text(`${pct.toFixed(0)}%`);
+            };
+            es.addEventListener('complete', () => {
+                es.close(); es = null;
+                $('#bar').css('width','100%').text('100%');
+                alert('✔ 下載完成！');
+                window.location = `/Home/File?jobId=${jobId}`;
+                currentJobId = null;          // 標記為已完成
+            });
+            es.addEventListener('error', e => {
+                es.close(); es = null;
+                alert('❌ 失敗：' + e.data);
+                currentJobId = null;
+            });
+        }
+        catch (err) {
+            alert('❌ 網路或伺服器錯誤：' + err);
+            resetUI();
+        }
+    });
 
-            // 3️⃣  自動觸發檔案下載
-            window.location = `/Home/File?jobId=${jobId}`;
-        });
-        es.addEventListener('error', e => {
-            es.close();
-            alert('❌ 失敗：' + e.data);
-        });
+    /* ===== 清空按鈕 ===== */
+    $('#btnClear').on('click', () => {
+        if (currentJobId && !confirm('仍有下載（轉檔）進行中，確定要取消並清空？')) return;
+        resetUI();
     });
 </script>
