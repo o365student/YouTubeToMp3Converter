@@ -17,7 +17,20 @@
 ---
 
 ## 目錄結構
-YouTubeToMp3Converter/ ├─ Controllers/ │ └─ HomeController.cs // 核心邏輯 ├─ Views/ │ └─ Home/Index.cshtml // Razor UI + Progress Bar ├─ Models/DownloadJob.cs ├─ tools/ // 外部工具 (自行下載) │ ├─ yt-dlp.exe │ ├─ ffmpeg.exe │ └─ ffprobe.exe └─ README.md
+YouTubeToMp3Converter/
+├── Controllers/
+│   └── HomeController.cs     # 核心邏輯
+├── Views/
+│   └── Home/
+│       └── Index.cshtml      # Razor UI + Progress Bar
+├── Models/
+│   └── DownloadJob.cs
+├── tools/                    # 外部工具 (自行下載)
+│   ├── yt-dlp.exe
+│   ├── ffmpeg.exe
+│   └── ffprobe.exe
+└── README.md
+
 
 
 ---
