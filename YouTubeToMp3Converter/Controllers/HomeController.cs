@@ -3,110 +3,149 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
+using YouTubeToMp3Converter.Models;
 
 namespace YouTubeToMp3Converter.Controllers
 {
     public class HomeController : Controller
     {
         private readonly IWebHostEnvironment _env;
-        private readonly ILogger<HomeController> _logger;
+        private readonly ILogger<HomeController> _log;
 
-        public HomeController(IWebHostEnvironment env, ILogger<HomeController> logger)
+        // 下載→50%，轉檔→100%
+        private const double DL_RATIO = 0.50;
+        private const double ENC_RATIO = 0.50;
+
+        private static readonly ConcurrentDictionary<string, DownloadJob> _jobs = new();
+
+        public HomeController(IWebHostEnvironment env, ILogger<HomeController> log)
         {
             _env = env;
-            _logger = logger;
+            _log = log;
         }
 
-        // GET /
+        // 首頁
         public IActionResult Index() => View();
 
-        // POST /Home/Download  表單送來時執行
+        /*──────────────────────── 1. 觸發下載 ────────────────────────*/
         [HttpPost]
-        public async Task<IActionResult> Download(string url, CancellationToken ct)
+        public async Task<IActionResult> Start([FromForm] string url, CancellationToken ct)
         {
             if (string.IsNullOrWhiteSpace(url))
+                return BadRequest("URL 不可為空");
+
+            var title = await GetTitleAsync(url, ct);
+            if (string.IsNullOrEmpty(title))
+                return BadRequest("無法取得影片標題");
+
+            var job = new DownloadJob { Title = title };
+            _jobs[job.Id] = job;
+
+            _ = Task.Run(() => RunJobAsync(job, url), ct);   // 背景工作
+            return Json(new { jobId = job.Id, title });
+        }
+
+        /*──────────────────────── 2. SSE 進度 ────────────────────────*/
+        public async Task Progress(string jobId, CancellationToken ct)
+        {
+            if (!_jobs.TryGetValue(jobId, out var job))
+                return;
+
+            Response.Headers.Add("Content-Type", "text/event-stream");
+            while (!ct.IsCancellationRequested && !job.Completed && job.Error == null)
             {
-                ModelState.AddModelError(string.Empty, "URL 不可為空");
-                return View("Index");                     // 直接回到同一頁並顯示錯誤
+                await Response.WriteAsync($"data: {job.Percent:F1}\n\n", ct);
+                await Response.Body.FlushAsync(ct);
+                await Task.Delay(500, ct);
             }
 
-            string finalPath = null!;
+            if (job.Error != null)
+                await Response.WriteAsync($"event: error\ndata: {job.Error}\n\n", ct);
+            else
+                await Response.WriteAsync($"event: complete\ndata: {job.Id}\n\n", ct);
 
+            await Response.Body.FlushAsync(ct);
+        }
+
+        /*──────────────────────── 3. 下載檔案 ────────────────────────*/
+        public IActionResult File(string jobId)
+        {
+            if (!_jobs.TryGetValue(jobId, out var job) || !System.IO.File.Exists(job.FilePath))
+                return NotFound();
+
+            var safeName = $"{SanitizeFileName(job.Title)}.mp3";
+            var bytes = System.IO.File.ReadAllBytes(job.FilePath);
+
+            System.IO.File.Delete(job.FilePath);   // 用完即刪
+            _jobs.TryRemove(jobId, out _);
+
+            return File(bytes, "audio/mpeg", safeName);
+        }
+
+        /*──────────────────────── 私有區域 ────────────────────────*/
+        private async Task<string> GetTitleAsync(string url, CancellationToken ct)
+        {
+            var yt = Path.Combine(_env.ContentRootPath, "tools", "yt-dlp.exe");
+            var psi = new ProcessStartInfo
+            {
+                FileName = yt,
+                Arguments = $"--print \"%(title)s\" {url}",
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var p = Process.Start(psi)!;
+            var title = await p.StandardOutput.ReadLineAsync(ct) ?? "";
+            await p.WaitForExitAsync(ct);
+            return title.Trim();
+        }
+
+        private async Task RunJobAsync(DownloadJob job, string url)
+        {
             try
             {
-                await foreach (var prog in RunYtDlpAndFfmpegAsync(url, ct))
-                {
-                    // 你可以改用 SignalR / SSE 把進度推給前端
-                    _logger.LogInformation("[{Percent,6:P0}] {Text}", prog.Percent, prog.Text);
-                }
+                var tempDir = Path.Combine(Path.GetTempPath(), job.Id);
+                Directory.CreateDirectory(tempDir);
 
-                finalPath = progTempMp3Path;              // 見下方方法
-                var bytes = System.IO.File.ReadAllBytes(finalPath);
-                return File(bytes, "audio/mpeg", "download.mp3");
+                var raw = Path.Combine(tempDir, "raw.webm");
+                var mp3 = Path.Combine(tempDir, "audio.mp3");
+                var yt = Path.Combine(_env.ContentRootPath, "tools", "yt-dlp.exe");
+                var ff = Path.Combine(_env.ContentRootPath, "tools", "ffmpeg.exe");
+
+                /*─── 下載 (0~50%) ───*/
+                await RunProcessAsync(yt, $"-f bestaudio -o \"{raw}\" {url}", pct =>
+                {
+                    var overall = Math.Max(job.Percent, pct * DL_RATIO);
+                    job.Percent = overall;
+                });
+
+                /*─── 轉檔 (50~100%) ───*/
+                await RunProcessAsync(ff,
+                    $"-y -i \"{raw}\" -c:a libmp3lame -b:a 128k -progress pipe:1 \"{mp3}\"",
+                    pct =>
+                    {
+                        var overall = Math.Max(job.Percent, 50 + pct * ENC_RATIO);
+                        job.Percent = overall;
+                    });
+
+                job.FilePath = mp3;
+                job.Percent = 100;
+                job.Completed = true;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "下載或轉檔失敗");
-                ModelState.AddModelError(string.Empty, "下載／轉檔失敗：" + ex.Message);
-                return View("Index");
-            }
-            finally
-            {
-                if (finalPath != null && System.IO.File.Exists(finalPath))
-                    System.IO.File.Delete(finalPath);     // 下載完就刪
+                job.Error = ex.Message;
+                _log.LogError(ex, "Job {Id} 失敗", job.Id);
             }
         }
 
-        // ----------------------- 私有方法 -----------------------------
-
-        private string progTempMp3Path = string.Empty;     // 暫存最終 MP3 路徑
-
-        private async IAsyncEnumerable<ProgressInfo> RunYtDlpAndFfmpegAsync(
-            string youtubeUrl,
-            [EnumeratorCancellation] CancellationToken ct)
-        {
-            var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(tempDir);
-
-            var rawPath = Path.Combine(tempDir, "raw.webm");
-            var mp3Path = Path.Combine(tempDir, "audio.mp3");
-            var ytDlpExe = Path.Combine(_env.ContentRootPath, "tools", "yt-dlp.exe");
-            var ffmpegExe = Path.Combine(_env.ContentRootPath, "tools", "ffmpeg.exe");
-
-            try
-            {
-                // 1. 下載
-                var ytArgs = $"-f bestaudio -o \"{rawPath}\" {youtubeUrl}";
-                await foreach (var p in RunProcessAsync(ytDlpExe, ytArgs, "yt-dlp", ct))
-                    yield return p;
-
-                // 2. 轉 MP3
-                var ffArgs =
-                    $"-y -i \"{rawPath}\" -c:a libmp3lame -b:a 128k -progress pipe:1 \"{mp3Path}\"";
-                await foreach (var p in RunProcessAsync(ffmpegExe, ffArgs, "ffmpeg", ct))
-                    yield return p;
-
-                // 3. 複製到系統 Temp 供回傳
-                progTempMp3Path = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}.mp3");
-                System.IO.File.Copy(mp3Path, progTempMp3Path, true);
-            }
-            finally
-            {
-                if (Directory.Exists(tempDir))
-                    Directory.Delete(tempDir, true);
-            }
-        }
-
-        private async IAsyncEnumerable<ProgressInfo> RunProcessAsync(
-            string fileName,
-            string args,
-            string tag,
-            [EnumeratorCancellation] CancellationToken ct)
+        private async Task RunProcessAsync(
+            string file, string args, Action<double> report)
         {
             var psi = new ProcessStartInfo
             {
-                FileName = fileName,
+                FileName = file,
                 Arguments = args,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -117,59 +156,46 @@ namespace YouTubeToMp3Converter.Controllers
             using var proc = new Process { StartInfo = psi };
             proc.Start();
 
-            var buffer = new ConcurrentQueue<string>();
+            var last = 0.0;
 
-            // 讀 stdout
-            _ = Task.Run(async () =>
+            double ClampMonotonic(double pct)
             {
-                while (!proc.HasExited && !ct.IsCancellationRequested)
-                {
-                    var line = await proc.StandardOutput.ReadLineAsync(ct);
-                    if (line != null) buffer.Enqueue(line);
-                }
-            }, ct);
-
-            // 讀 stderr
-            _ = Task.Run(async () =>
-            {
-                while (!proc.HasExited && !ct.IsCancellationRequested)
-                {
-                    var line = await proc.StandardError.ReadLineAsync(ct);
-                    if (line != null) buffer.Enqueue(line);
-                }
-            }, ct);
-
-            int lastPct = 0;
-            while (!proc.HasExited || !buffer.IsEmpty)
-            {
-                while (buffer.TryDequeue(out var line))
-                {
-                    lastPct = ParsePercent(line, lastPct);
-                    yield return new ProgressInfo(tag, lastPct / 100d, line);
-                }
-                await Task.Delay(100, ct);
+                pct = Math.Clamp(pct, 0, 100);
+                if (pct < last) pct = last;      // 不倒退
+                last = pct;
+                return pct;
             }
 
-            await proc.WaitForExitAsync(ct);
+            async Task ReadAsync(StreamReader sr)
+            {
+                string? line;
+                while ((line = await sr.ReadLineAsync()) != null)
+                {
+                    /* yt-dlp → [download]   42.8% */
+                    var m = Regex.Match(line, @"\s(\d{1,3}\.\d)%");
+                    if (m.Success && double.TryParse(m.Groups[1].Value, out var pct1))
+                        report(ClampMonotonic(pct1));
 
+                    /* ffmpeg → out_time_ms=... (這裡示意以百分比字串 progress=42.5 解析) */
+                    var m2 = Regex.Match(line, @"progress=(\d{1,3}\.\d+)");
+                    if (m2.Success && double.TryParse(m2.Groups[1].Value, out var pct2))
+                        report(ClampMonotonic(pct2));
+                }
+            }
+
+            // 平行讀 stdout / stderr
+            await Task.WhenAll(ReadAsync(proc.StandardOutput), ReadAsync(proc.StandardError));
+            await proc.WaitForExitAsync();
+
+            report(ClampMonotonic(100));   // 保證結束 = 100%
             if (proc.ExitCode != 0)
-                throw new InvalidOperationException($"{tag} 失敗 (ExitCode={proc.ExitCode})");
+                throw new InvalidOperationException($"{file} 失敗 (ExitCode={proc.ExitCode})");
         }
 
-        private static int ParsePercent(string line, int fallback)
+        private static string SanitizeFileName(string name)
         {
-            // yt-dlp： "[download]  42.8% ..."
-            var m = System.Text.RegularExpressions.Regex.Match(line, @"([\d\.]+)%");
-            if (m.Success && double.TryParse(m.Groups[1].Value, out var d))
-                return (int)d;
-
-            // ffmpeg：progress=end
-            if (line.StartsWith("progress=") && line.EndsWith("end"))
-                return 100;
-
-            return fallback;
+            var bad = Path.GetInvalidFileNameChars();
+            return string.Concat(name.Where(c => !bad.Contains(c)));
         }
-
-        private record ProgressInfo(string Source, double Percent, string Text);
     }
 }
