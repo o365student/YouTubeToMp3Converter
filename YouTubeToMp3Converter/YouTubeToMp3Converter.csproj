@@ -10,4 +10,8 @@
     <PackageReference Include="YoutubeExplode" Version="6.5.4" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Folder Include="wwwroot\downloads\" />
+  </ItemGroup>
+
 </Project>

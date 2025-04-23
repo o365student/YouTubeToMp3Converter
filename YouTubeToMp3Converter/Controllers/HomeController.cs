@@ -1,131 +1,175 @@
+ï»¿using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc;
-using YoutubeExplode;
-using YoutubeExplode.Videos.Streams;
+using Microsoft.Extensions.Logging;
+using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 
 namespace YouTubeToMp3Converter.Controllers
 {
     public class HomeController : Controller
     {
         private readonly IWebHostEnvironment _env;
+        private readonly ILogger<HomeController> _logger;
 
-        public HomeController(IWebHostEnvironment env)
+        public HomeController(IWebHostEnvironment env, ILogger<HomeController> logger)
         {
             _env = env;
+            _logger = logger;
         }
 
-        public IActionResult Index()
-        {
-            return View();
-        }
-        [HttpGet]
-        public IActionResult GetProgress()
-        {
-            string progressFilePath = Path.Combine(_env.WebRootPath, "downloads", "progress.txt");
-            if (System.IO.File.Exists(progressFilePath))
-            {
-                try
-                {
-                    using (var fs = new FileStream(progressFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-                    using (var reader = new StreamReader(fs))
-                    {
-                        string line;
-                        while ((line = reader.ReadLine()) != null)
-                        {
-                            if (line.StartsWith("progress="))
-                            {
-                                var progressValue = line.Split('=')[1];
-                                return Json(new { progress = progressValue });
-                            }
-                        }
-                    }
-                }
-                catch (IOException)
-                {
-                    // ¦pªGÀÉ®×¤´³QÂê©w¡Aªğ¦^¹w³]¶i«×
-                    return Json(new { progress = "0" });
-                }
-            }
-            return Json(new { progress = "0" });
-        }
+        // GET /
+        public IActionResult Index() => View();
 
-
+        // POST /Home/Download â€ƒè¡¨å–®é€ä¾†æ™‚åŸ·è¡Œ
         [HttpPost]
-        public async Task<IActionResult> Download(string videoUrl)
+        public async Task<IActionResult> Download(string url, CancellationToken ct)
         {
-            if (string.IsNullOrWhiteSpace(videoUrl))
+            if (string.IsNullOrWhiteSpace(url))
             {
-                ViewBag.Message = "½Ğ¿é¤J¦³®Äªº YouTube ¼v¤ùºô§}¡C";
-                return View("Index");
+                ModelState.AddModelError(string.Empty, "URL ä¸å¯ç‚ºç©º");
+                return View("Index");                     // ç›´æ¥å›åˆ°åŒä¸€é ä¸¦é¡¯ç¤ºéŒ¯èª¤
             }
+
+            string finalPath = null!;
 
             try
             {
-                var youtube = new YoutubeClient();
-
-                // ¨ú±o¼v¤ù¸ê°T
-                var video = await youtube.Videos.GetAsync(videoUrl);
-                var title = string.Join("_", video.Title.Split(Path.GetInvalidFileNameChars()));
-
-                // ¨ú±o­µ°T¦ê¬y
-                var streamManifest = await youtube.Videos.Streams.GetManifestAsync(video.Id);
-                var audioStreamInfo = streamManifest.GetAudioOnlyStreams().GetWithHighestBitrate();
-
-                if (audioStreamInfo == null)
+                await foreach (var prog in RunYtDlpAndFfmpegAsync(url, ct))
                 {
-                    ViewBag.Message = "µLªk¨ú±o­µ°T¦ê¬y¡C";
-                    return View("Index");
+                    // ä½ å¯ä»¥æ”¹ç”¨ SignalR / SSE æŠŠé€²åº¦æ¨çµ¦å‰ç«¯
+                    _logger.LogInformation("[{Percent,6:P0}] {Text}", prog.Percent, prog.Text);
                 }
 
-                // ³]©wÀÉ®×¸ô®|
-                var downloadsPath = Path.Combine(_env.WebRootPath, "downloads");
-                if (!Directory.Exists(downloadsPath))
-                    Directory.CreateDirectory(downloadsPath);
-
-                var tempFilePath = Path.Combine(downloadsPath, $"{title}.{audioStreamInfo.Container.Name}");
-                var outputFilePath = Path.Combine(downloadsPath, $"{title}.mp3");
-
-                // ¤U¸ü­µ°T¦ê¬y
-                await youtube.Videos.Streams.DownloadAsync(audioStreamInfo, tempFilePath);
-
-                // ¨Ï¥Î FFmpeg Âà´«¬° MP3
-                var ffmpegPath = Path.Combine(_env.ContentRootPath, "ffmpeg", "ffmpeg.exe");
-                var progressFilePath = Path.Combine(_env.WebRootPath, "downloads", "progress.txt");
-
-                var ffmpegArgs = $"-i \"{tempFilePath}\" -c:a libmp3lame -b:a 128k -preset ultrafast -threads 4 \"{outputFilePath}\"";
-
-
-                var process = new Process
-                {
-                    StartInfo = new ProcessStartInfo
-                    {
-                        FileName = ffmpegPath,
-                        Arguments = ffmpegArgs,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        UseShellExecute = false,
-                        CreateNoWindow = true
-                    }
-                };
-
-                process.Start();
-                await process.WaitForExitAsync();
-
-                // §R°£¼È¦sÀÉ®×
-                if (System.IO.File.Exists(tempFilePath))
-                    System.IO.File.Delete(tempFilePath);
-
-                // ´£¨Ñ¤U¸ü³sµ²
-                var downloadUrl = $"/downloads/{title}.mp3";
-                ViewBag.DownloadUrl = downloadUrl;
-                ViewBag.Message = "Âà´«¦¨¥\¡I½ĞÂIÀ»¥H¤U³sµ²¤U¸ü MP3 ÀÉ®×¡C";
+                finalPath = progTempMp3Path;              // è¦‹ä¸‹æ–¹æ–¹æ³•
+                var bytes = System.IO.File.ReadAllBytes(finalPath);
+                return File(bytes, "audio/mpeg", "download.mp3");
             }
             catch (Exception ex)
             {
-                ViewBag.Message = $"µo¥Í¿ù»~¡G{ex.Message}";
+                _logger.LogError(ex, "ä¸‹è¼‰æˆ–è½‰æª”å¤±æ•—");
+                ModelState.AddModelError(string.Empty, "ä¸‹è¼‰ï¼è½‰æª”å¤±æ•—ï¼š" + ex.Message);
+                return View("Index");
+            }
+            finally
+            {
+                if (finalPath != null && System.IO.File.Exists(finalPath))
+                    System.IO.File.Delete(finalPath);     // ä¸‹è¼‰å®Œå°±åˆª
+            }
+        }
+
+        // ----------------------- ç§æœ‰æ–¹æ³• -----------------------------
+
+        private string progTempMp3Path = string.Empty;     // æš«å­˜æœ€çµ‚ MP3 è·¯å¾‘
+
+        private async IAsyncEnumerable<ProgressInfo> RunYtDlpAndFfmpegAsync(
+            string youtubeUrl,
+            [EnumeratorCancellation] CancellationToken ct)
+        {
+            var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+
+            var rawPath = Path.Combine(tempDir, "raw.webm");
+            var mp3Path = Path.Combine(tempDir, "audio.mp3");
+            var ytDlpExe = Path.Combine(_env.ContentRootPath, "tools", "yt-dlp.exe");
+            var ffmpegExe = Path.Combine(_env.ContentRootPath, "tools", "ffmpeg.exe");
+
+            try
+            {
+                // 1. ä¸‹è¼‰
+                var ytArgs = $"-f bestaudio -o \"{rawPath}\" {youtubeUrl}";
+                await foreach (var p in RunProcessAsync(ytDlpExe, ytArgs, "yt-dlp", ct))
+                    yield return p;
+
+                // 2. è½‰ MP3
+                var ffArgs =
+                    $"-y -i \"{rawPath}\" -c:a libmp3lame -b:a 128k -progress pipe:1 \"{mp3Path}\"";
+                await foreach (var p in RunProcessAsync(ffmpegExe, ffArgs, "ffmpeg", ct))
+                    yield return p;
+
+                // 3. è¤‡è£½åˆ°ç³»çµ± Temp ä¾›å›å‚³
+                progTempMp3Path = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}.mp3");
+                System.IO.File.Copy(mp3Path, progTempMp3Path, true);
+            }
+            finally
+            {
+                if (Directory.Exists(tempDir))
+                    Directory.Delete(tempDir, true);
+            }
+        }
+
+        private async IAsyncEnumerable<ProgressInfo> RunProcessAsync(
+            string fileName,
+            string args,
+            string tag,
+            [EnumeratorCancellation] CancellationToken ct)
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = fileName,
+                Arguments = args,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using var proc = new Process { StartInfo = psi };
+            proc.Start();
+
+            var buffer = new ConcurrentQueue<string>();
+
+            // è®€ stdout
+            _ = Task.Run(async () =>
+            {
+                while (!proc.HasExited && !ct.IsCancellationRequested)
+                {
+                    var line = await proc.StandardOutput.ReadLineAsync(ct);
+                    if (line != null) buffer.Enqueue(line);
+                }
+            }, ct);
+
+            // è®€ stderr
+            _ = Task.Run(async () =>
+            {
+                while (!proc.HasExited && !ct.IsCancellationRequested)
+                {
+                    var line = await proc.StandardError.ReadLineAsync(ct);
+                    if (line != null) buffer.Enqueue(line);
+                }
+            }, ct);
+
+            int lastPct = 0;
+            while (!proc.HasExited || !buffer.IsEmpty)
+            {
+                while (buffer.TryDequeue(out var line))
+                {
+                    lastPct = ParsePercent(line, lastPct);
+                    yield return new ProgressInfo(tag, lastPct / 100d, line);
+                }
+                await Task.Delay(100, ct);
             }
 
-            return View("Index");
+            await proc.WaitForExitAsync(ct);
+
+            if (proc.ExitCode != 0)
+                throw new InvalidOperationException($"{tag} å¤±æ•— (ExitCode={proc.ExitCode})");
         }
+
+        private static int ParsePercent(string line, int fallback)
+        {
+            // yt-dlpï¼š "[download]  42.8% ..."
+            var m = System.Text.RegularExpressions.Regex.Match(line, @"([\d\.]+)%");
+            if (m.Success && double.TryParse(m.Groups[1].Value, out var d))
+                return (int)d;
+
+            // ffmpegï¼šprogress=end
+            if (line.StartsWith("progress=") && line.EndsWith("end"))
+                return 100;
+
+            return fallback;
+        }
+
+        private record ProgressInfo(string Source, double Percent, string Text);
     }
 }

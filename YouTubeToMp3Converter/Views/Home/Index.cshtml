@@ -1,56 +1,29 @@
 ﻿@{
-    ViewData["Title"] = "YouTube 轉 MP3 下載器";
+    ViewData["Title"] = "YouTube 轉 MP3";
 }
 
-<h1>YouTube 轉 MP3 下載器</h1>
-<h2>ㄚ綸專用</h2>
-<form asp-action="Download" method="post">
-    <label for="videoUrl">請輸入 YouTube 影片網址：</label><br />
-    <input type="text" id="videoUrl" name="videoUrl" style="width: 400px;" required />
-    <button type="submit">下載 MP3</button>
-</form>
+<h2>YouTube 轉 MP3</h2>
 
-<div id="progressContainer" style="display:none;">
-    <label for="progressBar">轉換進度：</label>
-    <progress id="progressBar" value="0" max="100"></progress>
-    <span id="progressText">0%</span>
-</div>
-
-@if (ViewBag.Message != null)
+<!-- 顯示 ModelState 錯誤 -->
+@if (!ViewData.ModelState.IsValid)
 {
-    <p>@ViewBag.Message</p>
-}
-
-@if (ViewBag.DownloadUrl != null)
-{
-    <p><a href="@ViewBag.DownloadUrl" download>點此下載 MP3</a></p>
-}
-
-@section Scripts {
-    <script>
-        function startProgress() {
-            document.getElementById('progressContainer').style.display = 'block';
-            var interval = setInterval(function () {
-                fetch('/Home/GetProgress')
-                    .then(response => response.json())
-                    .then(data => {
-                        if (data.progress === 'end') {
-                            clearInterval(interval);
-                            document.getElementById('progressBar').value = 100;
-                            document.getElementById('progressText').innerText = '100%';
-                        } else {
-                            // 假設 progress 為百分比數值
-                            var percent = parseInt(data.progress);
-                            document.getElementById('progressBar').value = percent;
-                            document.getElementById('progressText').innerText = percent + '%';
-                        }
-                    });
-            }, 1000);
+    <div class="alert alert-danger">
+        @foreach (var err in ViewData.ModelState.Values.SelectMany(v => v.Errors))
+        {
+            <div>@err.ErrorMessage</div>
         }
-
-        // 在表單提交後啟動進度查詢
-        document.querySelector('form').addEventListener('submit', function () {
-            startProgress();
-        });
-    </script>
+    </div>
 }
+
+<form asp-controller="Home" asp-action="Download" method="post">
+    <div class="mb-3">
+        <label for="url" class="form-label">YouTube 連結</label>
+        <input id="url"
+               name="url"
+               class="form-control"
+               placeholder="https://youtu.be/..."
+               required />
+    </div>
+
+    <button type="submit" class="btn btn-primary">下載 MP3</button>
+</form>
