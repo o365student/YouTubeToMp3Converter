@@ -13,5 +13,10 @@
   <ItemGroup>
     <Folder Include="wwwroot\downloads\" />
   </ItemGroup>
+  <ItemGroup>
+		<None Include="tools\**\*.*">
+			<CopyToPublishDirectory>Always</CopyToPublishDirectory>
+		</None>
+  </ItemGroup>
 
 </Project>

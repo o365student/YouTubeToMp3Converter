@@ -21,7 +21,7 @@
     },
     "resourceName": {
       "type": "string",
-      "defaultValue": "YT2Mp3Converter",
+      "defaultValue": "YouTubeToMp3Converter20250425234640",
       "metadata": {
         "description": "Name of the main resource to be created by this template."
       }
