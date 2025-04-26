@@ -13,11 +13,10 @@
   <ItemGroup>
     <Folder Include="wwwroot\downloads\" />
   </ItemGroup>
-	<ItemGroup>
-		<None Include="tools\cookies.txt">
-			<CopyToPublishDirectory>Always</CopyToPublishDirectory>
-		</None>
-	</ItemGroup>
 
-
+  <ItemGroup>
+	<None Include="tools\**\*.*">
+		<CopyToPublishDirectory>Always</CopyToPublishDirectory>
+	</None>
+  </ItemGroup>
 </Project>
